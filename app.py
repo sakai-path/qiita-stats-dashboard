@@ -1,4 +1,3 @@
-# app.py
 import os
 import time
 import requests
@@ -67,8 +66,6 @@ def fetch_stock_count(item_id: str, token_key: str) -> int:
     return int(r.headers.get("Total-Count", 0))
 
 # ---- データ取得 ----
-st.title("Qiita データハック・ダッシュボード（いいね / ストック / タグ分析）")
-
 try:
     raw = fetch_all_my_items(token)
 except requests.HTTPError as e:
@@ -82,8 +79,8 @@ if not raw:
     st.info("記事が見つかりませんでした。")
     st.stop()
 
-# ---- DataFrame 化（全期間固定） ----
-# いいね = likes_count、ストックは別途取得
+# ---- DataFrame 化（全期間ベース） ----
+# いいね = likes_count、views = page_views_count（なければ 0）、ストックは別途取得
 df = pd.DataFrame(
     [
         {
@@ -91,7 +88,9 @@ df = pd.DataFrame(
             "title": it["title"],
             "url": it["url"],
             "created_at": it["created_at"],
-            "likes": it.get("likes_count", 0),  # いいね（LGTM）
+            "likes": it.get("likes_count", 0),  # いいね
+            "views": it.get("page_views_count") or 0,  # 閲覧数
+            "private": it.get("private", False),       # 限定公開フラグ
             # タグ（全タグ集計用に展開）
             "tags": [t.get("name") for t in it.get("tags", []) if t.get("name")],
         }
@@ -107,6 +106,41 @@ df["created_at"] = (
 )
 df["year"] = df["created_at"].dt.year
 df["month"] = df["created_at"].dt.to_period("M").astype(str)  # YYYY-MM
+
+# ---- 期間・限定公開フィルタ（サイドバー） ----
+with st.sidebar:
+    st.subheader("期間・対象フィルタ")
+
+    period_mode = st.radio("集計対象期間", ("全期間", "日付を指定"), index=0)
+
+    # デフォルトの期間は、全記事の最小/最大日付
+    default_start = df["created_at"].min().date()
+    default_end = df["created_at"].max().date()
+
+    if period_mode == "全期間":
+        start_date = default_start
+        end_date = default_end
+        st.caption(f"全期間: {start_date} ～ {end_date}")
+    else:
+        start_date = st.date_input("開始日", value=default_start)
+        end_date = st.date_input("終了日", value=default_end)
+
+    include_private = st.checkbox("限定公開記事も含める", value=False)
+
+# ---- 限定公開フィルタ ----
+if not include_private:
+    df = df[~df["private"].fillna(False)]
+
+# ---- 期間フィルタ ----
+start_ts = pd.to_datetime(start_date)
+end_ts = pd.to_datetime(end_date) + pd.Timedelta(days=1)  # 終了日の末日まで含める
+
+df = df[(df["created_at"] >= start_ts) & (df["created_at"] < end_ts)]
+
+if df.empty:
+    st.title("Qiita データハック・ダッシュボード（いいね / ストック / タグ分析）")
+    st.info("指定した期間・公開範囲では記事がありません。")
+    st.stop()
 
 # ---- ストック数の取得（ランキングに使う） ----
 if fetch_stocks:
@@ -127,12 +161,66 @@ if fetch_stocks:
 else:
     df["stocks"] = 0
 
-# ========== 上部KPI ==========
+# ==== タイトル（選択された期間を表示） ====
+period_str = f"{start_date} ～ {end_date}"
+if period_mode == "全期間":
+    title_suffix = f"（全期間: {period_str}）"
+else:
+    title_suffix = f"（{period_str}）"
+
+st.title(f"Qiita データハック・ダッシュボード{title_suffix}")
+
+# ========== 上部KPI（合計） ==========
+total_articles = len(df)
+total_likes = int(df["likes"].sum())
+total_stocks = int(df["stocks"].sum())
+total_views = int(df["views"].sum())
+
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("記事数", len(df))
-c2.metric("総いいね", int(df["likes"].sum()))
-c3.metric("総ストック", int(df["stocks"].sum()))
-c4.metric("最新投稿日", df["created_at"].max().strftime("%Y-%m-%d"))
+c1.metric("記事数", total_articles)
+c2.metric("総いいね", total_likes)
+c3.metric("総ストック", total_stocks)
+c4.metric("総views", total_views)
+
+# ========== KPI（平均） ==========
+avg_likes = total_likes / total_articles if total_articles > 0 else 0
+avg_stocks = total_stocks / total_articles if total_articles > 0 else 0
+avg_views = total_views / total_articles if total_articles > 0 else 0
+
+c5, c6, c7 = st.columns(3)
+c5.metric("平均いいね / 記事", f"{avg_likes:.2f}")
+c6.metric("平均ストック / 記事", f"{avg_stocks:.2f}")
+c7.metric("平均views / 記事", f"{avg_views:.2f}")
+
+# ========== 記事一覧（投稿日 / タイトル / いいね / ストック / views） ==========
+st.subheader("記事一覧")
+
+df_list = df.copy()
+df_list["published_date"] = df_list["created_at"].dt.strftime("%Y-%m-%d")
+
+# タイトルにリンクを埋め込み
+df_list["記事タイトル"] = df_list.apply(
+    lambda row: f"[{row['title']}]({row['url']})",
+    axis=1,
+)
+
+df_display = df_list[[
+    "published_date",
+    "記事タイトル",
+    "likes",
+    "stocks",
+    "views",
+]].rename(columns={
+    "published_date": "投稿日",
+    "likes": "いいね",
+    "stocks": "ストック",
+    "views": "views",
+})
+
+# 投稿日の新しい順に並べ替え
+df_display = df_display.sort_values("投稿日", ascending=False)
+
+st.markdown(df_display.to_markdown(index=False), unsafe_allow_html=False)
 
 # ========== 全記事ランキング（いいね / ストック） ==========
 st.subheader("ランキング（全記事・上位）")
@@ -142,19 +230,19 @@ rank_like = df.sort_values(["likes", "stocks"], ascending=False).head(int(top_n)
 rank_stock = df.sort_values(["stocks", "likes"], ascending=False).head(int(top_n))
 
 col_a.markdown("**いいね数 ランキング**")
-col_a.dataframe(rank_like[["title", "likes", "stocks", "url"]], use_container_width=True)
+col_a.dataframe(rank_like[["title", "likes", "stocks", "views", "url"]], use_container_width=True)
 
 col_b.markdown("**ストック数 ランキング**")
-col_b.dataframe(rank_stock[["title", "stocks", "likes", "url"]], use_container_width=True)
+col_b.dataframe(rank_stock[["title", "stocks", "likes", "views", "url"]], use_container_width=True)
 
-# ========== 時系列（全期間固定） ==========
-st.subheader("時系列（全期間）")
-monthly = df.set_index("created_at")[["likes", "stocks"]].resample("M").sum()
+# ========== 時系列（期間内） ==========
+st.subheader("時系列（期間内）")
+monthly = df.set_index("created_at")[["likes", "stocks", "views"]].resample("M").sum()
 st.line_chart(monthly)
 
 # 累積
 st.markdown("**累積（Cumulative）**")
-cumsum = df.set_index("created_at")[["likes", "stocks"]].sort_index().cumsum()
+cumsum = df.set_index("created_at")[["likes", "stocks", "views"]].sort_index().cumsum()
 st.line_chart(cumsum)
 
 # ========== いいね vs ストック 散布図 ==========
@@ -165,7 +253,7 @@ scatter = (
     .encode(
         x=alt.X("likes:Q", title="いいね"),
         y=alt.Y("stocks:Q", title="ストック"),
-        tooltip=["title:N", "likes:Q", "stocks:Q", "url:N", "month:N"],
+        tooltip=["title:N", "likes:Q", "stocks:Q", "views:Q", "url:N", "month:N"],
     )
     .interactive()
 )
@@ -181,16 +269,26 @@ df_tags = df_tags.dropna(subset=["tags"])
 # タグ別 合計 / 平均
 tag_agg = (
     df_tags.groupby("tags", as_index=False)
-    .agg(articles=("id", "count"), likes_sum=("likes", "sum"), stocks_sum=("stocks", "sum"),
-         likes_avg=("likes", "mean"), stocks_avg=("stocks", "mean"))
+    .agg(
+        articles=("id", "count"),
+        likes_sum=("likes", "sum"),
+        stocks_sum=("stocks", "sum"),
+        views_sum=("views", "sum"),
+        likes_avg=("likes", "mean"),
+        stocks_avg=("stocks", "mean"),
+        views_avg=("views", "mean"),
+    )
 )
 
 # 上位タグ（合計いいね順）
 top_tags = tag_agg.sort_values(["likes_sum", "stocks_sum"], ascending=False).head(int(top_n))
 
 c5, c6 = st.columns(2)
-c5.markdown("**タグ別：合計値（いいね / ストック） 上位**")
-c5.dataframe(top_tags[["tags", "articles", "likes_sum", "stocks_sum", "likes_avg", "stocks_avg"]], use_container_width=True)
+c5.markdown("**タグ別：合計値（いいね / ストック / views） 上位**")
+c5.dataframe(
+    top_tags[["tags", "articles", "likes_sum", "stocks_sum", "views_sum", "likes_avg", "stocks_avg", "views_avg"]],
+    use_container_width=True,
+)
 
 # 棒グラフ（合計いいねの上位タグ）
 bar_likes = (
@@ -199,22 +297,20 @@ bar_likes = (
     .encode(
         x=alt.X("likes_sum:Q", title="合計いいね"),
         y=alt.Y("tags:N", sort="-x", title="タグ"),
-        tooltip=["tags:N", "articles:Q", "likes_sum:Q", "stocks_sum:Q", "likes_avg:Q", "stocks_avg:Q"],
+        tooltip=["tags:N", "articles:Q", "likes_sum:Q", "stocks_sum:Q", "views_sum:Q"],
     )
 )
 st.altair_chart(bar_likes, use_container_width=True)
 
 # タグ × 月の推移（合計いいね）
 st.markdown("**タグ×月：合計いいねの推移（上位タグのみ）**")
-# 上位タグ名だけ抽出してフィルタ
 focus_tag_names = top_tags["tags"].tolist()
 df_tags_month = (
     df_tags[df_tags["tags"].isin(focus_tag_names)]
     .groupby(["month", "tags"], as_index=False)
-    .agg(likes_sum=("likes", "sum"), stocks_sum=("stocks", "sum"))
+    .agg(likes_sum=("likes", "sum"), stocks_sum=("stocks", "sum"), views_sum=("views", "sum"))
 )
 
-# エリア（またはライン）で表示
 line_tag_month = (
     alt.Chart(df_tags_month)
     .mark_line(point=True)
@@ -222,7 +318,7 @@ line_tag_month = (
         x=alt.X("month:N", title="年月（YYYY-MM）", sort=None),
         y=alt.Y("likes_sum:Q", title="合計いいね"),
         color=alt.Color("tags:N", title="タグ"),
-        tooltip=["month:N", "tags:N", "likes_sum:Q", "stocks_sum:Q"],
+        tooltip=["month:N", "tags:N", "likes_sum:Q", "stocks_sum:Q", "views_sum:Q"],
     )
     .properties(height=350)
     .interactive()
@@ -235,12 +331,12 @@ st.subheader("データハック：発見を促すビュー")
 # ストックが多いのに「いいね」が少ない（参考保存系？）
 ref_like = df[df["stocks"] > df["likes"]].sort_values("stocks", ascending=False).head(int(top_n))
 st.markdown("**ストック > いいね の記事（参考保存されやすい）**")
-st.dataframe(ref_like[["title", "likes", "stocks", "url"]], use_container_width=True)
+st.dataframe(ref_like[["title", "likes", "stocks", "views", "url"]], use_container_width=True)
 
 # 直近で伸びやすい“バズ”候補（いいねが上位、ストックもそこそこ）
 buzz = df.sort_values(["likes", "stocks"], ascending=False).head(int(top_n))
 st.markdown("**直近の“バズ”上位（いいね優先・ストック順でブレークダウン）**")
-st.dataframe(buzz[["title", "likes", "stocks", "url"]], use_container_width=True)
+st.dataframe(buzz[["title", "likes", "stocks", "views", "url"]], use_container_width=True)
 
 # ========== CSVエクスポート ==========
 st.subheader("エクスポート")
