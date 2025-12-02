@@ -220,7 +220,9 @@ df_display = df_list[[
 # 投稿日の新しい順に並べ替え
 df_display = df_display.sort_values("投稿日", ascending=False)
 
-st.markdown(df_display.to_markdown(index=False), unsafe_allow_html=False)
+# HTMLテーブルとして描画（Markdown依存をやめる）
+html = df_display.to_html(escape=False, index=False)
+st.write(html, unsafe_allow_html=True)
 
 # ========== 全記事ランキング（いいね / ストック） ==========
 st.subheader("ランキング（全記事・上位）")
