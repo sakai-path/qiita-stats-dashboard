@@ -7,20 +7,22 @@ import altair as alt
 
 st.set_page_config(page_title="Qiitaデータハック（いいね / ストック / タグ分析）", layout="wide")
 
-# ========= スタイル（metricに薄い色） =========
-st.markdown(
-    """
-    <style>
-    div[data-testid="stMetric"] {
-        background-color: #f5f5f5;
-        padding: 8px 10px;
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ========= KPI用の簡易カード =========
+def metric_card(label: str, value: str, bg_color: str):
+    st.markdown(
+        f"""
+        <div style="
+            background-color:{bg_color};
+            padding:8px 10px;
+            border-radius:8px;
+            border:1px solid #e0e0e0;
+        ">
+            <div style="font-size:0.9rem;color:#333;">{label}</div>
+            <div style="font-size:1.4rem;font-weight:bold;">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ========= 基本設定 =========
 BASE = "https://qiita.com/api/v2"
@@ -177,7 +179,7 @@ else:
 period_str = f"{start_date} ～ {end_date}"
 st.markdown(f"# Qiita データハック\n### （{period_str}）")
 
-# ========== 上部KPI（合計） ==========
+# ========== 上部KPI（合計：薄いブルー） ==========
 total_articles = len(df)
 total_likes = int(df["likes"].sum())
 total_stocks = int(df["stocks"].sum())
@@ -185,43 +187,45 @@ total_views = int(df["views"].sum())
 
 st.markdown("#### 合計")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("記事数", total_articles)
-c2.metric("総いいね", total_likes)
-c3.metric("総ストック", total_stocks)
-c4.metric("総views", total_views)
+metric_card("記事数", f"{total_articles}", "#e3f2fd")
+with c2:
+    metric_card("総いいね", f"{total_likes}", "#e3f2fd")
+with c3:
+    metric_card("総ストック", f"{total_stocks}", "#e3f2fd")
+with c4:
+    metric_card("総views", f"{total_views}", "#e3f2fd")
 
-# ========== KPI（平均） ==========
+# ========== KPI（平均：薄いイエロー） ==========
 avg_likes = total_likes / total_articles if total_articles > 0 else 0
 avg_stocks = total_stocks / total_articles if total_articles > 0 else 0
 avg_views = total_views / total_articles if total_articles > 0 else 0
 
 st.markdown("#### 平均（1記事あたり）")
-c5, c6, c7 = st.columns(3)
-c5.metric("平均いいね / 記事", f"{avg_likes:.2f}")
-c6.metric("平均ストック / 記事", f"{avg_stocks:.2f}")
-c7.metric("平均views / 記事", f"{avg_views:.2f}")
+a1, a2, a3 = st.columns(3)
+with a1:
+    metric_card("平均いいね / 記事", f"{avg_likes:.2f}", "#fff8e1")
+with a2:
+    metric_card("平均ストック / 記事", f"{avg_stocks:.2f}", "#fff8e1")
+with a3:
+    metric_card("平均views / 記事", f"{avg_views:.2f}", "#fff8e1")
 
-# ========== 記事一覧（投稿日 / タイトル / いいね / ストック / views） ==========
+# ========== 記事一覧 ==========
 st.subheader("記事一覧")
 
 df_list = df.copy()
 df_list["投稿日"] = df_list["created_at"].dt.strftime("%Y-%m-%d")
-
-# タイトルを HTML リンクにする
 df_list["記事タイトル"] = df_list.apply(
     lambda row: f'<a href="{row["url"]}" target="_blank">{row["title"]}</a>',
     axis=1,
 )
-
 df_display = df_list[["投稿日", "記事タイトル", "likes", "stocks", "views"]].rename(
-    columns={
-        "likes": "いいね",
-        "stocks": "ストック",
-        "views": "views",
-    }
+    columns={"likes": "いいね", "stocks": "ストック", "views": "views"}
 )
 
-df_display = df_display.sort_values("投稿日", ascending=False)
+# 並び順を選べるように（初期値：古い順）
+sort_order = st.radio("並び順", ("投稿日が古い順", "投稿日が新しい順"), horizontal=True)
+ascending = True if "古い" in sort_order else False
+df_display = df_display.sort_values("投稿日", ascending=ascending)
 
 html_articles = df_display.to_html(escape=False, index=False)
 st.write(html_articles, unsafe_allow_html=True)
@@ -258,14 +262,14 @@ html_stock = display_stock.to_html(escape=False, index=False)
 col_b.markdown("**ストック数 ランキング**")
 col_b.write(html_stock, unsafe_allow_html=True)
 
-# ========== 時系列（期間内） ==========
+# ========== 時系列（期間内：いいね / ストックのみ） ==========
 st.subheader("時系列（期間内）")
-monthly = df.set_index("created_at")[["likes", "stocks", "views"]].resample("M").sum()
+monthly = df.set_index("created_at")[["likes", "stocks"]].resample("M").sum()
 st.line_chart(monthly)
 
 # 累積
 st.markdown("**累積（Cumulative）**")
-cumsum = df.set_index("created_at")[["likes", "stocks", "views"]].sort_index().cumsum()
+cumsum = df.set_index("created_at")[["likes", "stocks"]].sort_index().cumsum()
 st.line_chart(cumsum)
 
 # ========== いいね vs ストック 散布図 ==========
@@ -303,12 +307,25 @@ tag_agg = (
 
 top_tags = tag_agg.sort_values(["likes_sum", "stocks_sum"], ascending=False).head(int(top_n))
 
-c5, c6 = st.columns(2)
-c5.markdown("**タグ別：合計値（いいね / ストック / views） 上位**")
-c5.dataframe(
-    top_tags[["tags", "articles", "likes_sum", "stocks_sum", "views_sum", "likes_avg", "stocks_avg", "views_avg"]],
-    use_container_width=True,
+# 表示用に列名を日本語＆_sum削除
+display_tags = top_tags[
+    ["tags", "articles", "likes_sum", "stocks_sum", "views_sum", "likes_avg", "stocks_avg", "views_avg"]
+].rename(
+    columns={
+        "tags": "タグ",
+        "articles": "記事数",
+        "likes_sum": "合計いいね",
+        "stocks_sum": "合計ストック",
+        "views_sum": "合計views",
+        "likes_avg": "平均いいね",
+        "stocks_avg": "平均ストック",
+        "views_avg": "平均views",
+    }
 )
+
+c5, c6 = st.columns(2)
+c5.markdown("**タグ別：合計値 / 平均値（いいね / ストック / views） 上位**")
+c5.dataframe(display_tags, use_container_width=True)
 
 bar_likes = (
     alt.Chart(top_tags)
