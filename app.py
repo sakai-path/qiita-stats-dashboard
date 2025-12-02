@@ -36,7 +36,6 @@ with st.sidebar:
     st.header("設定")
     if not token:
         token = st.text_input("Qiita Personal Access Token", type="password", help="read_qiita スコープでOK")
-    fetch_stocks = st.toggle("ストック数も取得する（ランキングに反映）", value=True)
     top_n = st.number_input("ランキングやタグ表示の上限件数", min_value=5, max_value=100, value=30, step=5)
     st.caption("レート制限: 認証済み 1000回/時（トークン単位）")
 
@@ -70,18 +69,6 @@ def fetch_all_my_items(token_key: str):
         time.sleep(0.1)  # マナー
     return items
 
-@st.cache_data(show_spinner=False)
-def fetch_stock_count(item_id: str, token_key: str) -> int:
-    """特定記事のストック数のみ（Total-Countヘッダ）を取得。"""
-    r = requests.get(
-        f"{BASE}/items/{item_id}/stockers",
-        headers=H,
-        params={"per_page": 1},
-        timeout=TIMEOUT,
-    )
-    r.raise_for_status()
-    return int(r.headers.get("Total-Count", 0))
-
 # ---- データ取得 ----
 try:
     raw = fetch_all_my_items(token)
@@ -104,9 +91,10 @@ df = pd.DataFrame(
             "title": it["title"],
             "url": it["url"],
             "created_at": it["created_at"],
-            "likes": it.get("likes_count", 0),             # いいね
-            "views": it.get("page_views_count") or 0,      # 閲覧数
-            "private": it.get("private", False),           # 限定公開フラグ
+            "likes": it.get("likes_count", 0),                 # いいね
+            "stocks": it.get("stocks_count", 0),               # ストック（あれば）
+            "views": it.get("page_views_count") or 0,          # 閲覧数
+            "private": it.get("private", False),               # 限定公開フラグ
             "tags": [t.get("name") for t in it.get("tags", []) if t.get("name")],
         }
         for it in raw
@@ -156,25 +144,6 @@ if df.empty:
     st.info("指定した期間・公開範囲では記事がありません。")
     st.stop()
 
-# ---- ストック数の取得（ランキングに使う） ----
-if fetch_stocks:
-    st.caption("ストック数を取得中…（記事数によっては少し時間がかかります）")
-    stocks = []
-    prog = st.progress(0.0)
-    total = len(df)
-    for i, item_id in enumerate(df["id"]):
-        try:
-            stocks.append(fetch_stock_count(item_id, token))
-        except requests.RequestException:
-            stocks.append(0)
-        if i % 5 == 0:
-            prog.progress((i + 1) / total)
-        time.sleep(0.05)
-    prog.progress(1.0)
-    df["stocks"] = stocks
-else:
-    df["stocks"] = 0
-
 # ==== タイトル（選択された期間を表示） ====
 period_str = f"{start_date} ～ {end_date}"
 st.markdown(f"# Qiita データハック\n### （{period_str}）")
@@ -187,7 +156,8 @@ total_views = int(df["views"].sum())
 
 st.markdown("#### 合計")
 c1, c2, c3, c4 = st.columns(4)
-metric_card("記事数", f"{total_articles}", "#e3f2fd")
+with c1:
+    metric_card("記事数", f"{total_articles}", "#e3f2fd")
 with c2:
     metric_card("総いいね", f"{total_likes}", "#e3f2fd")
 with c3:
@@ -214,6 +184,9 @@ st.subheader("記事一覧")
 
 df_list = df.copy()
 df_list["投稿日"] = df_list["created_at"].dt.strftime("%Y-%m-%d")
+df_list["投稿日"] = df_list["投稿日"].apply(
+    lambda d: f'<span style="white-space: nowrap;">{d}</span>'
+)
 df_list["記事タイトル"] = df_list.apply(
     lambda row: f'<a href="{row["url"]}" target="_blank">{row["title"]}</a>',
     axis=1,
@@ -222,7 +195,6 @@ df_display = df_list[["投稿日", "記事タイトル", "likes", "stocks", "vie
     columns={"likes": "いいね", "stocks": "ストック", "views": "views"}
 )
 
-# 並び順を選べるように（初期値：古い順）
 sort_order = st.radio("並び順", ("投稿日が古い順", "投稿日が新しい順"), horizontal=True)
 ascending = True if "古い" in sort_order else False
 df_display = df_display.sort_values("投稿日", ascending=ascending)
@@ -267,7 +239,6 @@ st.subheader("時系列（期間内）")
 monthly = df.set_index("created_at")[["likes", "stocks"]].resample("M").sum()
 st.line_chart(monthly)
 
-# 累積
 st.markdown("**累積（Cumulative）**")
 cumsum = df.set_index("created_at")[["likes", "stocks"]].sort_index().cumsum()
 st.line_chart(cumsum)
@@ -307,7 +278,6 @@ tag_agg = (
 
 top_tags = tag_agg.sort_values(["likes_sum", "stocks_sum"], ascending=False).head(int(top_n))
 
-# 表示用に列名を日本語＆_sum削除
 display_tags = top_tags[
     ["tags", "articles", "likes_sum", "stocks_sum", "views_sum", "likes_avg", "stocks_avg", "views_avg"]
 ].rename(
@@ -323,9 +293,9 @@ display_tags = top_tags[
     }
 )
 
-c5, c6 = st.columns(2)
-c5.markdown("**タグ別：合計値 / 平均値（いいね / ストック / views） 上位**")
-c5.dataframe(display_tags, use_container_width=True)
+st.markdown("**タグ別：合計値 / 平均値（いいね / ストック / views） 上位**")
+html_tags = display_tags.to_html(index=False)
+st.write(html_tags, unsafe_allow_html=True)
 
 bar_likes = (
     alt.Chart(top_tags)
